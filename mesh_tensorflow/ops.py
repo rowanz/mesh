@@ -6148,3 +6148,89 @@ def nth_largest_element(x, n, reduced_dim, name=None):
 
 def nth_smallest_element(x, n, reduced_dim, name=None):
   return -nth_largest_element(-x, n, reduced_dim, name=name)
+
+
+class ArgsortOperation(Operation):
+  """Compute top k indices and values - see comment on top_k() below."""
+
+  def __init__(self, x, reduced_dim, name=None):
+    super(ArgsortOperation, self).__init__([x], name=name or "argsort")
+    self._value_dtype = x.dtype
+    if reduced_dim not in x.shape.dims:
+      raise ValueError("reduced dim %s must be in x.shape %s"
+                       % (reduced_dim, x.shape))
+    output_shape = x.shape
+    self._outputs = [Tensor(self, output_shape, x.dtype),
+                     Tensor(self, output_shape, tf.int32),]
+    self._reduced_dim = reduced_dim
+    self._splittable_dims, self._unsplittable_dims = (
+        self._initialize_splittable_and_unsplittable_dims("unsplittable"
+            "splittable", [self._reduced_dim.name]))
+
+  def gradient(self, grad_ys):
+    dvalue = grad_ys[0]
+    indices = self.outputs[1]
+    mapping = one_hot(indices, self._reduced_dim, dtype=self._value_dtype)
+    return [einsum([dvalue, mapping], output_shape=self.inputs[0].shape)]
+
+  def lower(self, lowering):
+    mesh_impl = lowering.mesh_impl(self)
+    x = self.inputs[0]
+    ndims = x.shape.ndims
+    reduced_axis = x.shape.dims.index(self._reduced_dim)
+    reduced_mesh_axis = mesh_impl.tensor_dimension_to_mesh_axis(
+        self._reduced_dim)
+    if reduced_mesh_axis is not None:
+      reduced_dim_per_shard = (
+          self._reduced_dim.size // mesh_impl.shape[reduced_mesh_axis].size)
+    else:
+      reduced_dim_per_shard = self._reduced_dim.size
+    def _slicewise_top_k(t):
+      t = tf.transpose(
+          t, [i for i in range(ndims) if i != reduced_axis] + [reduced_axis])
+      inds = tf.argsort(t, direction='DESCENDING')
+      values = tf.gather(t, inds, batch_dims=ndims-1)
+      return values, inds
+
+    values, indices = mesh_impl.slicewise(_slicewise_top_k, lowering.tensors[x])
+    if reduced_mesh_axis is not None:
+      # indices are now indices within a shard.  Make them global indices.
+      indices = mesh_impl.slicewise(
+          lambda idxs, pcoord: idxs + pcoord * reduced_dim_per_shard,
+          indices, mesh_impl.laid_out_pcoord(reduced_mesh_axis))
+      # concatenate values and indices across processors,
+      #   duplicating the result across mesh axis `reduced_mesh_axis`.
+      values = mesh_impl.allconcat(values, reduced_mesh_axis, ndims - 1)
+      indices = mesh_impl.allconcat(indices, reduced_mesh_axis, ndims - 1)
+
+      # final reduction to find top k among all shards
+      def _global_top_k(vals, global_indices):
+        local_indices = tf.argsort(vals, direction='DESCENDING')
+        vals = tf.gather(vals, local_indices, batch_dims=ndims-1)
+
+        # vals, local_indices = tf.math.top_k(vals, self._k_dim.size)
+        return vals, tf.gather(global_indices,
+                               local_indices,
+                               batch_dims=ndims-1)
+      values, indices = mesh_impl.slicewise(_global_top_k, values, indices)
+    lowering.set_tensor_lowering(self.outputs[0], values)
+    lowering.set_tensor_lowering(self.outputs[1], indices)
+
+
+def argsort(x, argsort_dim, name=None):
+  """Like tf.math.top_k.
+
+  This operation returns two tensors with the same shape.  The output shape
+  is identical to the shape of x, except that reduced_dim is removed and
+  k_dim is inserted at the end.
+
+  Args:
+    x: a Tensor
+    argsort_dim: a Dimension in x.shape.dims.
+    name: optional string.
+  Returns:
+    values: a Tensor with same type as x.
+    indices: a Tensor with dtype tf.int32
+  """
+  op = ArgsortOperation(x, argsort_dim, name=name)
+  return op.outputs[0], op.outputs[1]

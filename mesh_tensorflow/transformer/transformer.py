@@ -744,7 +744,8 @@ class Unitransformer(object):
                             encoder_layer_outputs=None,
                             never_end=False,
                             remove_partial_sequences=False,
-                            sampling_keep_top_k=-1):
+                            sampling_keep_top_k=-1,
+                            sampling_keep_top_p=1.0):
     """Sample randomly one token at a time.
 
     The partial_sequences represent partial sequences to be continued.  The
@@ -775,6 +776,7 @@ class Unitransformer(object):
         sequences from the output
       sampling_keep_top_k: an integer - if not -1, only sample from the top k
         logits.
+      sampling_keep_top_p: a float - if not 1.0, only sample from the top p % of values after the softmax is computed.
 
     Returns:
       a Tensor with shape [<batch_dims>, length_dim]
@@ -881,22 +883,40 @@ class Unitransformer(object):
               self.output_vocab_dim, on_value=-1e9, off_value=0.0,
               dtype=logits.dtype)
 
+      if sampling_keep_top_p < 0.9999999:
+        probs = mtf.softmax(logits / temperature, self.output_vocab_dim)
+        probs_sorted, indices = mtf.argsort(probs, argsort_dim=self.output_vocab_dim)
+        cumulative_probs_sorted = mtf.cumsum(probs_sorted, dim=self.output_vocab_dim, exclusive=False)
+
+        # find the top pth index to cut off. careful. we don't want to cutoff everything!
+        # result will be [batch_size, vocab_perm]
+        exclude_mask = mtf.logical_not(
+            mtf.logical_or(cumulative_probs_sorted < sampling_keep_top_p,
+                           mtf.range(cumulative_probs_sorted.mesh, self.output_vocab_dim, dtype=tf.float32)[None] < 1.0))
+
+        # Sample in the sorted space, then unsort by looking at the indices
+        logits_to_use = tf.gather(logits, indices, batch_dims=logits.shape.ndims-1) - mtf.to_float(exclude_mask) * 1e10
+        ids_this_step_perm = mtf.sample_with_temperature(logits_to_use, self.output_vocab_dim)
+        ids_this_step = tf.gather(indices, ids_this_step_perm, batch_dims=indices.shape.ndims-1)
+
       # TBD whether this should be before or after never_end:
       # Note for adding top_p sampling in the future, in other code bases, the
       # option to apply temperature is done before the top-k truncation. This
       # implementation does this in the opposite order. For top-k this doesn't
       # matter, but for top_p it will.
-      if sampling_keep_top_k != -1:
-        if sampling_keep_top_k <= 0:
-          raise ValueError("sampling_keep_top_k must either be -1 or positive.")
-        k_largest = mtf.nth_largest_element(
-            logits, n=sampling_keep_top_k,
-            reduced_dim=self.output_vocab_dim)
-        logits = mtf.where(mtf.less_equal(logits, k_largest),
-                           mtf.ones_like(logits)*-1e6, logits)
+      else:
+        if sampling_keep_top_k != -1:
+          if sampling_keep_top_k <= 0:
+            raise ValueError("sampling_keep_top_k must either be -1 or positive.")
+          k_largest = mtf.nth_largest_element(
+              logits, n=sampling_keep_top_k,
+              reduced_dim=self.output_vocab_dim)
+          logits = mtf.where(mtf.less_equal(logits, k_largest),
+                             mtf.ones_like(logits)*-1e6, logits)
 
-      ids_this_step = mtf.sample_with_temperature(
-          logits, self.output_vocab_dim, temperature)
+        ids_this_step = mtf.sample_with_temperature(
+            logits, self.output_vocab_dim, temperature)
+
       new_position = position + 1
       new_ids = ids + ids_this_step * mtf.one_hot(
           position, length_dim, dtype=tf.int32)
@@ -1199,7 +1219,8 @@ class Bitransformer(object):
              temperature=0.0,
              decode_length_multiplier=1.5,
              decode_length_constant=10,
-             max_decode_length=None):
+             max_decode_length=None,
+             sampling_keep_top_p=1.0):
     """Sampling or beam search.
 
     TODO(noam): should we make the output length dimension different from the
@@ -1253,7 +1274,9 @@ class Bitransformer(object):
           encoder_inputs=mtf.layers.rename_length_to_memory_length(inputs),
           shared_params=shared_params,
           has_partial_sequences=False,
-          encoder_layer_outputs=encoder_layer_outputs)
+          encoder_layer_outputs=encoder_layer_outputs,
+          sampling_keep_top_p=sampling_keep_top_p,
+      )
     else:
       if temperature != 0:
         raise ValueError(
