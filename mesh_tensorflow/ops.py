@@ -6164,7 +6164,7 @@ class ArgsortOperation(Operation):
                      Tensor(self, output_shape, tf.int32),]
     self._reduced_dim = reduced_dim
     self._splittable_dims, self._unsplittable_dims = (
-        self._initialize_splittable_and_unsplittable_dims("unsplittable"
+        self._initialize_splittable_and_unsplittable_dims(
             "splittable", [self._reduced_dim.name]))
 
   def gradient(self, grad_ys):
