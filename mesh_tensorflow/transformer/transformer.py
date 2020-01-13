@@ -50,9 +50,9 @@ from __future__ import print_function
 import json
 
 import gin
-import mesh_tensorflow as mtf
-
 import tensorflow.compat.v1 as tf
+
+import mesh_tensorflow as mtf
 
 
 class TransformerLayer(object):
@@ -890,9 +890,10 @@ class Unitransformer(object):
 
         # find the top pth index to cut off. careful. we don't want to cutoff everything!
         # result will be [batch_size, vocab_perm]
-        exclude_mask = mtf.logical_not(
-            mtf.logical_or(cumulative_probs_sorted < sampling_keep_top_p,
-                           mtf.range(cumulative_probs_sorted.mesh, self.output_vocab_dim, dtype=tf.float32)[None] < 1.0))
+        exclude_mask = mtf.logical_not(mtf.logical_or(
+          mtf.less(cumulative_probs_sorted, tf.ones_like(cumulative_probs_sorted) * sampling_keep_top_p),
+          mtf.less(mtf.range(cumulative_probs_sorted.mesh, self.output_vocab_dim, dtype=tf.float32)[None],
+                   mtf.ones_like(cumulative_probs_sorted))))
 
         # Sample in the sorted space, then unsort by looking at the indices
         logits_to_use = tf.gather(logits, indices, batch_dims=logits.shape.ndims-1) - mtf.to_float(exclude_mask) * 1e10
