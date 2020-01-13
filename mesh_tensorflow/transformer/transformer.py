@@ -891,7 +891,7 @@ class Unitransformer(object):
         # find the top pth index to cut off. careful. we don't want to cutoff everything!
         # result will be [batch_size, vocab_perm]
         exclude_mask = mtf.logical_not(mtf.logical_or(
-          mtf.less(cumulative_probs_sorted, tf.ones_like(cumulative_probs_sorted) * sampling_keep_top_p),
+          mtf.less(cumulative_probs_sorted, mtf.ones_like(cumulative_probs_sorted) * sampling_keep_top_p),
           mtf.less(mtf.range(cumulative_probs_sorted.mesh, self.output_vocab_dim, dtype=tf.float32)[None],
                    mtf.ones_like(cumulative_probs_sorted))))
 
