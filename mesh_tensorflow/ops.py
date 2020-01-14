@@ -6176,43 +6176,22 @@ class ArgsortOperation(Operation):
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
     x = self.inputs[0]
-    ndims = x.shape.ndims
-    reduced_axis = x.shape.dims.index(self._reduced_dim)
-    reduced_mesh_axis = mesh_impl.tensor_dimension_to_mesh_axis(
-        self._reduced_dim)
-    if reduced_mesh_axis is not None:
-      reduced_dim_per_shard = (
-          self._reduced_dim.size // mesh_impl.shape[reduced_mesh_axis].size)
+    ndims=x.shape.ndims
+    output_shape = self.outputs[0].shape
+
+    def _global_top_k(vals):
+      local_indices = tf.argsort(vals, direction='DESCENDING')
+      vals = tf.gather(vals, local_indices, batch_dims=ndims - 1)
+      # vals, local_indices = tf.math.top_k(vals, self._k_dim.size)
+      return vals, local_indices
+
+    reduced_mesh_axis = mesh_impl.tensor_dimension_to_mesh_axis(self._reduced_dim)
+    if reduced_mesh_axis is None:
+      x_global = lowering.tensors[x]
     else:
-      reduced_dim_per_shard = self._reduced_dim.size
-    def _slicewise_top_k(t):
-      t = tf.transpose(
-          t, [i for i in range(ndims) if i != reduced_axis] + [reduced_axis])
-      inds = tf.argsort(t, direction='DESCENDING')
-      values = tf.gather(t, inds, batch_dims=ndims-1)
-      return values, inds
+      x_global = mesh_impl.allconcat(lowering.tensors[x], reduced_mesh_axis, x.shape.ndims - 1)
 
-    values, indices = mesh_impl.slicewise(_slicewise_top_k, lowering.tensors[x])
-    if reduced_mesh_axis is not None:
-      # indices are now indices within a shard.  Make them global indices.
-      indices = mesh_impl.slicewise(
-          lambda idxs, pcoord: idxs + pcoord * reduced_dim_per_shard,
-          indices, mesh_impl.laid_out_pcoord(reduced_mesh_axis))
-      # concatenate values and indices across processors,
-      #   duplicating the result across mesh axis `reduced_mesh_axis`.
-      values = mesh_impl.allconcat(values, reduced_mesh_axis, ndims - 1)
-      indices = mesh_impl.allconcat(indices, reduced_mesh_axis, ndims - 1)
-
-      # final reduction to find top k among all shards
-      def _global_top_k(vals, global_indices):
-        local_indices = tf.argsort(vals, direction='DESCENDING')
-        vals = tf.gather(vals, local_indices, batch_dims=ndims-1)
-
-        # vals, local_indices = tf.math.top_k(vals, self._k_dim.size)
-        return vals, tf.gather(global_indices,
-                               local_indices,
-                               batch_dims=ndims-1)
-      values, indices = mesh_impl.slicewise(_global_top_k, values, indices)
+    values, indices = mesh_impl.slicewise(_global_top_k, x_global)
     lowering.set_tensor_lowering(self.outputs[0], values)
     lowering.set_tensor_lowering(self.outputs[1], indices)
 

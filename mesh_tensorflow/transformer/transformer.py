@@ -886,6 +886,13 @@ class Unitransformer(object):
       if sampling_keep_top_p < 0.9999999:
         # probs = mtf.softmax(logits / temperature, self.output_vocab_dim)
         logits_sorted, indices = mtf.argsort(logits / temperature, argsort_dim=self.output_vocab_dim)
+
+        # TODO: Were I to do
+        # logits_sorted = logits / temperature
+        # indices = mtf.range(logits.mesh, self.output_vocab_dim, dtype=tf.int32)
+        # Things used to not work with model_parallelism != 1
+        # but I think I fixeed it???!?!?
+
         probs_sorted = mtf.softmax(logits_sorted, self.output_vocab_dim)
         cumulative_probs_sorted = mtf.cumsum(probs_sorted, dim=self.output_vocab_dim, exclusive=False)
 
