@@ -884,21 +884,26 @@ class Unitransformer(object):
               dtype=logits.dtype)
 
       if sampling_keep_top_p < 0.9999999:
-        probs = mtf.softmax(logits / temperature, self.output_vocab_dim)
-        probs_sorted, indices = mtf.argsort(probs, argsort_dim=self.output_vocab_dim)
+        # probs = mtf.softmax(logits / temperature, self.output_vocab_dim)
+        logits_sorted, indices = mtf.argsort(logits / temperature, argsort_dim=self.output_vocab_dim)
+        probs_sorted = mtf.softmax(logits_sorted, self.output_vocab_dim)
         cumulative_probs_sorted = mtf.cumsum(probs_sorted, dim=self.output_vocab_dim, exclusive=False)
 
         # find the top pth index to cut off. careful. we don't want to cutoff everything!
         # result will be [batch_size, vocab_perm]
-        exclude_mask = mtf.logical_not(mtf.logical_or(
-          mtf.less(cumulative_probs_sorted, mtf.ones_like(cumulative_probs_sorted) * sampling_keep_top_p),
-          mtf.less(mtf.range(cumulative_probs_sorted.mesh, self.output_vocab_dim, dtype=tf.float32)[None],
-                   mtf.ones_like(cumulative_probs_sorted))))
+        cdf_below_thresh = mtf.less(cumulative_probs_sorted, mtf.ones_like(cumulative_probs_sorted) * sampling_keep_top_p)
+        is_argmax = mtf.less(mtf.range(cumulative_probs_sorted.mesh, self.output_vocab_dim, dtype=tf.float32), mtf.constant(cdf_below_thresh.mesh, 1.0, dtype=tf.float32))
+
+        exclude_mask = mtf.logical_not(mtf.logical_or(cdf_below_thresh, is_argmax))
 
         # Sample in the sorted space, then unsort by looking at the indices
-        logits_to_use = tf.gather(logits, indices, batch_dims=logits.shape.ndims-1) - mtf.to_float(exclude_mask) * 1e10
+        logits_to_use = logits_sorted - mtf.cast(exclude_mask, logits_sorted.dtype) * 1e10
         ids_this_step_perm = mtf.sample_with_temperature(logits_to_use, self.output_vocab_dim)
-        ids_this_step = tf.gather(indices, ids_this_step_perm, batch_dims=indices.shape.ndims-1)
+
+        # Want to do a batch gather but I cant?
+        ids_this_step_perm_expanded = mtf.one_hot(ids_this_step_perm, self.output_vocab_dim, dtype=indices.dtype)
+        ids_this_step = mtf.einsum([indices, ids_this_step_perm_expanded], batch_dims)
+        # ids_this_step = tf.gather(indices, ids_this_step_perm, batch_dims=indices.shape.ndims-1)
 
       # TBD whether this should be before or after never_end:
       # Note for adding top_p sampling in the future, in other code bases, the
