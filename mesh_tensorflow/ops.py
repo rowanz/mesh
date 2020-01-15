@@ -25,16 +25,15 @@ import operator
 import os
 import re
 
-from mesh_tensorflow import utils
 import numpy as np
 import six
-from six.moves import xrange  # pylint: disable=redefined-builtin
-
 import tensorflow.compat.v1 as tf
-
+from six.moves import xrange  # pylint: disable=redefined-builtin
 # pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.ops.gen_nn_ops import conv3d_backprop_input_v2
 from tensorflow.python.ops.nn_ops import conv3d_backprop_filter_v2
+
+from mesh_tensorflow import utils
 
 Dimension = collections.namedtuple("Dimension", ["name", "size"])
 
@@ -6159,13 +6158,14 @@ class ArgsortOperation(Operation):
     if reduced_dim not in x.shape.dims:
       raise ValueError("reduced dim %s must be in x.shape %s"
                        % (reduced_dim, x.shape))
-    output_shape = x.shape
+    self._vocab_dim = Dimension("vocabclone", reduced_dim.size)
+    output_shape = x.shape - reduced_dim + self._vocab_dim
     self._outputs = [Tensor(self, output_shape, x.dtype),
                      Tensor(self, output_shape, tf.int32),]
     self._reduced_dim = reduced_dim
     self._splittable_dims, self._unsplittable_dims = (
         self._initialize_splittable_and_unsplittable_dims(
-            "splittable", [self._reduced_dim.name]))
+            "splittable", [self._vocab_dim.name]))
 
   def gradient(self, grad_ys):
     dvalue = grad_ys[0]
@@ -6176,8 +6176,9 @@ class ArgsortOperation(Operation):
   def lower(self, lowering):
     mesh_impl = lowering.mesh_impl(self)
     x = self.inputs[0]
-    ndims=x.shape.ndims
+    ndims = x.shape.ndims
     output_shape = self.outputs[0].shape
+    reduced_axis = x.shape.dims.index(self._reduced_dim)
 
     def _global_top_k(vals):
       local_indices = tf.argsort(vals, direction='DESCENDING')
@@ -6189,8 +6190,8 @@ class ArgsortOperation(Operation):
     if reduced_mesh_axis is None:
       x_global = lowering.tensors[x]
     else:
-      x_global = mesh_impl.allconcat(lowering.tensors[x], reduced_mesh_axis, x.shape.ndims - 1)
-
+      x_global = mesh_impl.allconcat(lowering.tensors[x],
+                                     reduced_mesh_axis, x.shape.ndims - 1)
     values, indices = mesh_impl.slicewise(_global_top_k, x_global)
     lowering.set_tensor_lowering(self.outputs[0], values)
     lowering.set_tensor_lowering(self.outputs[1], indices)
